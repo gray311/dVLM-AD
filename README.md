@@ -55,7 +55,7 @@ python inference.py \
 This script will generate:
 
 * Driving action trajectories
-* (Optional) reasoning traces associated with each trajectory
+* Reasoning process associated with each trajectory
 
 ---
 
