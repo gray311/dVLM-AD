@@ -31,7 +31,6 @@ from tqdm import tqdm
 # Waymo metrics: Rater Feedback Score
 from .utils import get_rater_feedback_score  # noqa: E402
 
-# ---- Waymo E2E protos（不同版本类型名可能不同，这里做兜底尝试）
 from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as e2e_data_pb2  # noqa: E402
 from waymo_open_dataset.protos import end_to_end_driving_data_pb2 as wod_e2ed_pb2
 from waymo_open_dataset import dataset_pb2 as open_dataset
@@ -51,7 +50,6 @@ def extract_waypoints_from_frame_bytes(frame_bytes):
     # print(data.intent)
     # print(data.preference_trajectories)
 
-    # 有的字段可能缺失，做个健壮判断
     px = list(data.future_states.pos_x) if len(data.future_states.pos_x) else []
     py = list(data.future_states.pos_y) if len(data.future_states.pos_y) else []
     pz = list(data.future_states.pos_z) if len(data.future_states.pos_z) else []
@@ -59,7 +57,6 @@ def extract_waypoints_from_frame_bytes(frame_bytes):
     n = min(len(px), len(py), len(pz))
     waypoints = [[float(px[i]), float(py[i])] for i in range(n)]
 
-    # 可用作唯一键的标识：context.name + timestamp
     frame_id = data.frame.context.name if data.frame.context.name else ""
     ts = int(data.frame.timestamp_micros)
 
@@ -110,7 +107,6 @@ def load_waymo_e2e_data():
         raise FileNotFoundError(f"No TFRecords matched {VALIDATION_FILES}")
 
     cnt = 0
-    # 顺序遍历所有 test tfrecord（可按需并行多个文件）
 
     gt_map = {}
     for f in filenames.numpy().tolist():
@@ -132,41 +128,25 @@ import re
 import re
 from typing import List
 
-# 支持 ±号 / 小数 / 科学计数法
+
 NUM = r'[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?'
 
-# 抓取 "trajectory": "...." 的内容（允许换行、转义）
+
 TRAJ_FIELD_RE = re.compile(
     r'"trajectory"\s*:\s*"(?P<inner>(?:\\.|[^"\\])*)"',
     flags=re.DOTALL
 )
 
-# 允许方括号被转义（\[, \]），逗号前也可能有反斜杠
+
 PAIR_RE = re.compile(
     rf'\\?\[\s*({NUM})\s*\\?,\s*({NUM})\s*\\?\]',
     flags=re.IGNORECASE
 )
 
 def extract_trajectory(blob: str) -> List[List[float]]:
-    """
-    从任意长字符串中用正则提取 trajectory -> list[list[float,float]]。
-    兼容：1) JSON中转义字符串；2) 直接出现的 [x,y]；3) 带 mdm 标记。
-    """
-    print(blob)
     blob = blob[blob.index("trajectory"):]
-
-    # if m:
-    #     inner = m.group('inner')
-    # else:
-    #     # 若没有标准 "trajectory": "..." 字段，就尝试 mdm 区块或全串
-    #     mdm = re.search(r'<\|mdm_start\|>(.*?)<\|mdm_end\|>', blob, flags=re.DOTALL)
-    #     inner = mdm.group(1) if mdm else blob
-
-    # 去掉 mdm 标记
     inner = re.sub(r'<\|mdm_start\|>|<\|mdm_end\|>', '', blob)
 
-    # 将常见的 JSON 转义去掉（只对可能影响解析的字符做“解转义”）
-    # 例如 \" -> "， \[ -> [， \] -> ]， \, -> ,
     inner = (inner
              .replace(r'\"', '"')
              .replace(r'\[', '[')
@@ -174,16 +154,14 @@ def extract_trajectory(blob: str) -> List[List[float]]:
              .replace(r'\,', ',')
              .replace(r'\+', '+'))
 
-    # 提取 [x, y] 对
     pairs = PAIR_RE.findall(inner)
 
     if not pairs:
-        # 再尝试一次：如果用户给的是未转义的原始文本，去掉上面的反斜杠替换可能带来的影响
         PAIR_RE_PLAIN = re.compile(rf'\[\s*({NUM})\s*,\s*({NUM})\s*\]', flags=re.IGNORECASE)
         pairs = PAIR_RE_PLAIN.findall(inner)
 
     if not pairs:
-        raise ValueError("未能在 trajectory 中找到任何 [x, y] 坐标对。")
+        raise ValueError("")
 
     return [[float(x), float(y)] for x, y in pairs]
 
@@ -202,7 +180,7 @@ def _finite_diff_accel(p, t):
     p = np.asarray(p, float); t = np.asarray(t, float)
     n = len(p); a = np.zeros(n, float)
     if n < 3: return a
-    # 端点用邻域近似
+
     a[0]  = 2*(((p[1]-p[0])/(t[1]-t[0])) - ((p[2]-p[1])/(t[2]-t[1]))) / ((t[1]-t[0]) + (t[2]-t[1]))
     a[-1] = 2*(((p[-1]-p[-2])/(t[-1]-t[-2])) - ((p[-2]-p[-3])/(t[-2]-t[-3]))) / ((t[-1]-t[-2]) + (t[-2]-t[-3]))
     for i in range(1, n-1):
@@ -233,30 +211,24 @@ def _eval_quintic(coeffs, tau):
     return (((a5*tau + a4)*tau + a3)*tau + a2)*tau**2 + a1*tau + a0
 
 def jmt_interpolate_xy_with_start(p_start, traj_1to5, t_new):
-    """
-    p_start: 起点 (x0, y0)，对应 t=0s
-    traj_1to5: 形如 (5,2) 的数组，依次是 t=1..5s 的 (x,y)
-    t_new: 需要采样的时间戳（如 np.linspace(0.25, 5.0, 20)）
-    """
     P = np.vstack([np.asarray(p_start, float)[None, :], np.asarray(traj_1to5, float)])  # (6,2)
-    t = np.arange(0.0, 6.0)  # [0,1,2,3,4,5]  对应 P 的 6 个点
+    t = np.arange(0.0, 6.0)  # [0,1,2,3,4,5] 
 
-    # 估计端点导数
+
     vx = _finite_diff_velocity(P[:,0], t); vy = _finite_diff_velocity(P[:,1], t)
     ax = _finite_diff_accel  (P[:,0], t); ay = _finite_diff_accel  (P[:,1], t)
 
-    # 为每段 [t_i, t_{i+1}] 生成 quintic（共 5 段：0-1,1-2,...,4-5）
+  
     coeffs_x, coeffs_y, seg_starts = [], [], []
     for i in range(len(t)-1):
-        T = t[i+1] - t[i]   # 这里就是 1s
+        T = t[i+1] - t[i]  
         cx = _jmt_coeffs(P[i,0], vx[i], ax[i], P[i+1,0], vx[i+1], ax[i+1], T)
         cy = _jmt_coeffs(P[i,1], vy[i], ay[i], P[i+1,1], vy[i+1], ay[i+1], T)
         coeffs_x.append(cx); coeffs_y.append(cy); seg_starts.append(t[i])
     seg_starts = np.asarray(seg_starts)
 
-    # 采样
+  
     t_new = np.asarray(t_new, float)
-    # 建议限制在 [0,5] 内，避免外推
     t_new = np.clip(t_new, 0.0, 5.0)
 
     X = np.empty_like(t_new); Y = np.empty_like(t_new)
@@ -270,11 +242,6 @@ def jmt_interpolate_xy_with_start(p_start, traj_1to5, t_new):
 
 
 def load_predictions(json_path: str) -> Dict[str, Dict[str, np.ndarray]]:
-    """
-    加载预测 JSON，返回：
-      pred_map[frame_name] = {"trajs": [K,T,2], "probs": [K]}
-    顶层可能叫 "prediction" 或 "predictions"，也可能直接是 {frame_name: ...}
-    """
     with open(json_path, "r") as f:
         obj = json.load(f)
 
@@ -289,9 +256,7 @@ def load_predictions(json_path: str) -> Dict[str, Dict[str, np.ndarray]]:
             scene = line['sample_id'].split("-")[0]
             from scipy.interpolate import PchipInterpolator
 
-            # 已有的5个waypoints：1s,2s,3s,4s,5s
             traj = np.array(trajectory, dtype=float)  # shape (5,2)
-
             traj_4hz = jmt_interpolate_xy_with_start((0.0, 0.0), traj, np.linspace(0.25, 5.0, 20))
             print(traj_4hz.shape)
             pred_map[line['sample_id']] = traj_4hz
@@ -424,7 +389,6 @@ def main():
 
 
     def to_list_2dec(arr):
-        """将任意形状的 numpy 数组四舍五入到两位小数并转为 list。"""
         if not isinstance(arr, np.ndarray):
             arr = np.asarray(arr)
         arr = np.round(arr.astype(float), 2)
@@ -463,5 +427,6 @@ python -m waymo.eval_planning \
 
 python -m waymo.eval_planning \
     --pred_json /weka/home/xliu316/scratchcxiao13/yingzi/LLaDA-V/eval/nuScenes/ad_finetune_waymo_val_cot_planning_ckpt1200_attack_v1.json
+
 
 """
